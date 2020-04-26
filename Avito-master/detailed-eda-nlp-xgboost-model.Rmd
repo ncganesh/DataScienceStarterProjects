@@ -1,0 +1,511 @@
+---
+title: 'Avito Extensive Beginners data Analysis'
+date: '`r Sys.Date()`'
+output:
+  html_document:
+    number_sections: true
+    fig_caption: true
+    toc: true
+    fig_width: 7
+    fig_height: 4.5
+    theme: cosmo
+    highlight: tango
+    code_folding: hide
+---
+
+<center><img src="https://www.vostoknewventures.com/wp-content/uploads/2015/08/Avito_new_Vostok_small.png"></center>
+
+# Introduction
+ 
+ Sellers on their platform sometimes feel frustrated with both too little demand (indicating something is wrong with the product or the product listing) or
+ too much demand (indicating a hot item with a good description was underpriced).
+ 
+ **Avito**, Russia’s largest classified advertisements website, is deeply familiar with this problem.
+
+The aim of this challenge is to predict predict demand for an online advertisement based on its full description (title, description, images, etc.), its context (geographically where it was posted, similar ads already posted) and historical demand for similar ads in similar contexts. 
+With this information, Avito can inform sellers on how to best optimize their listing and provide some indication of how much interest they should realistically expect to receive.
+
+The [data] (https://www.kaggle.com/c/avito-demand-prediction/data) 
+
+train.csv - Train data.
+test.csv - Test data. Same schema as the train data, minus deal_probability.
+
+
+# Loading Libraries and Importing Data {.tabset .tabset-fade .tabset-pills}
+
+## Loading libraries
+
+```{r, message = FALSE}
+# general visualisation
+library('tidyverse')
+library('lubridate')
+library(text2vec)
+library(tokenizers)
+library(stopwords)
+library(magrittr)
+library(xgboost)
+```
+
+## Importing data
+
+```{r,message=FALSE,warning=FALSE}
+
+rm(list=ls())
+
+fillColor = "#FFA07A"
+fillColor2 = "#F1C40F"
+
+train = read_csv("../input/train.csv",locale = locale(encoding = stringi::stri_enc_get()))
+test = read_csv("../input/test.csv",locale = locale(encoding = stringi::stri_enc_get()))
+
+```
+
+
+#  Exploring Data : Identifying Variables {.tabset .tabset-fade .tabset-pills}
+
+ we identify the data type and category of  each variables. 
+ 
+ *glimpse*  to get glimpse of  every column in a data frame.
+ *summary*  to get overall summary of data.
+
+## Training data
+
+```{r}
+summary(train)
+```
+
+```{r}
+glimpse(train)
+```
+
+- There are 1503424 records in Avito  `train` data set.
+
+-item_id - Ad id.
+-user_id - User id.
+-region - Ad region.
+-city - Ad city.
+-parent_category_name - Top level ad category as classified by Avito's ad model.
+-category_name - Fine grain ad category as classified by Avito's ad model.
+-param_1,param_2,param_3 - Optional parameter from Avito's ad model.
+-title - Ad title.
+-description - Ad description.
+-price - Ad price.
+-item_seq_number - Ad sequential number for user.
+-activation_date- Date ad was placed.
+-user_type - User type.
+-image - Id code of image. Ties to a jpg file in train_jpg. Not every ad has an image.
+-image_top_1 - Avito's classification code for the image.
+-deal_probability - The target variable. This is the likelihood that an ad actually sold something. It's not possible to verify every transaction with certainty, so this column's value can be any float from zero to one.
+
+
+## Test data
+
+```{r}
+summary(test)
+```
+
+
+```{r}
+glimpse(test)
+```
+
+##Formating features
+
+###Converting category names,region & user type to Factors
+```{r,message=FALSE,warning=FALSE, results='hide'}
+combined = train %>% 
+  select(-deal_probability) %>% 
+  bind_rows(test) %>% 
+  mutate(user_type = as.integer(as_factor(user_type)),
+         price = log1p(price),
+         txt = paste(category_name, parent_category_name,region, city, param_1, param_2, param_3, title, description, sep = " "),
+         mon = month(activation_date),
+         mday = mday(activation_date),
+         week = week(activation_date),
+         wday = wday(activation_date)) 
+```
+
+
+# Understanding Missing Data Values
+
+##Number of missing values in train data
+```{r}
+sum(is.na(train))
+```
+##Number of missing values in test data
+
+```{r}
+sum(is.na(test))
+```
+
+## Missing values percentage of variables
+
+```{r,message=FALSE,warning=FALSE}
+missing_data <- as.data.frame(sort(sapply(train, function(x) sum(is.na(x))),decreasing = T))
+nrow(train)
+missing_data <- (missing_data/1503424)*100
+colnames(missing_data)[1] <- "missingvaluesPercentage"
+missing_data$features <- rownames(missing_data)
+ggplot(missing_data[missing_data$missingvaluesPercentage >5,],aes(reorder(features,-missingvaluesPercentage),missingvaluesPercentage,fill= features)) +
+  geom_bar(stat="identity") +theme_minimal() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1), legend.position = "none") + ylab("Percentage of missingvalues") +
+  xlab("Feature") + ggtitle("Understanding Missing Data")
+  ```
+  
+  Observations : 
+  There are many NA's for  Optional parameters - Users usually ignore entering optional parameters.So we can impute as  No params for optional parameters variable.
+  Image - NA means no image for the Ad as described in data section that - " Not every ad has an image" .We can Impute the NA as No Image.
+  Price - Some User has not entered price an we can impute as 0.
+
+
+##Imputing Missing Values
+
+```{r,message=FALSE,warning=FALSE}
+combined$param_3[is.na(combined$param_3)] = "no param3"
+combined$param_2[is.na(combined$param_2)] = "no param2"
+combined$param_1[is.na(combined$param_1)] = "no param1"
+combined$description[is.na(combined$description)] = "No description"
+combined$image[is.na(combined$image)] = "No image"
+combined$image_top_1[is.na(combined$image_top_1)] = "No imagetop"
+combined$price[is.na(combined$price)] = 0
+```
+We have taken care of all missing values
+
+# Univariate Analysis - Exploring  each features one by one.
+
+##Region - Ad Region
+
+```{r,message=FALSE,warning=FALSE}
+
+region <- c("Краснодарский край","Свердловская область","Ростовская область",
+"Татарстан","Челябинская область","Нижегородская область","Самарская область",
+"Башкортостан","Пермский край","Новосибирская область","Ставропольский край",
+"Ханты-Мансийский АО","Воронежская область","Иркутская область","Тульская область","Тюменская область",
+"Белгородская область")
+
+region_en <- c("Krasnodar","Sverdlovsk","Rostov","Tatarstan","Chelyabinsk",
+"Nizhny Novgorod","Samara","Bashkortostan","Perm","Novosibirsk","Stavropol",
+"Khanty-Mansiysk Autonomous Okrug","Voronezh","Irkutsk","Tula","Tyumen",
+"Belgorod")
+
+df_regions_en <- as.data.frame(cbind(region,region_en))
+
+options(scipen = 99)
+train %>%
+  count(region) %>%
+  arrange(desc(n)) %>%
+  left_join(df_regions_en) %>%
+  filter(!is.na(region_en)) %>%
+           ggplot(aes(reorder(region_en, -n, FUN = min), n, fill = region_en)) +
+           geom_col() + 
+           theme(legend.position = "none", axis.text.x  = element_text(angle = 90,hjust=1, vjust=0.9)) + 
+           labs(x = 'regions',y = 'Total No of Ads') +
+           ggtitle("Total Number of Ads sorted by Regions with Highest Ads")
+```
+
+
+Observations:
+
+- The region with highest number of Ads is `Krasnodar` region with `Sverdlovsk` , `Rostov` , in  second  & third place.
+
+##City - Ad City
+
+```{r,message=FALSE,warning=FALSE}
+city <-c("Краснодар","Екатеринбург","Новосибирск","Ростов-на-Дону","Нижний Новгород",
+"Челябинск","Пермь","Казань","Самара","Омск")
+
+city_en <-c("Krasnodar","Ekaterinburg","Novosibirsk","Rostov-na-Donu","Nizhny Novgorod",
+"Chelyabinsk","Permian","Kazan","Samara","Omsk")
+
+df_city_en <- as.data.frame(cbind(city,city_en) )
+
+options(scipen = 99)
+train %>%
+  count(city) %>%
+  arrange(desc(n)) %>%
+  left_join(df_city_en) %>%
+  filter(!is.na(city_en)) %>%
+           ggplot(aes(reorder(city_en, -n, FUN = min), n, fill = city_en)) +
+           geom_col() + 
+           theme(legend.position = "none", axis.text.x  = element_text(angle = 90,hjust=1, vjust=0.9)) + 
+           labs(x = 'citys',y = 'Total No of Ads') +
+           ggtitle("Total Number of Ads sorted by by Most popular City")
+```
+
+
+
+Observations:
+
+The Highest Number of Ads posted are in `Krasnodar` and  `Ekaterinburg` City 
+followed by `Novosibirsk` , `Rostov-na-Donu` and `Nizhny Novgorod` Cities
+
+##parent category name - Top level ad category as classified by Avito's ad model
+
+```{r,message=FALSE,warning=FALSE}
+
+parent_category_name <- c("Личные вещи","Для дома и дачи","Бытовая электроника","Недвижимость",
+"Хобби и отдых","Транспорт","Услуги","Животные","Для бизнеса")
+
+parent_category_name_en <- c("Personal things","home and cottages","Consumer electronics","Property",
+"Hobbies and Recreation","Transport","services","Animals","business")
+
+df_parentcategory_en <- as.data.frame(cbind(parent_category_name,parent_category_name_en ) )
+
+options(scipen = 99)
+train %>%
+  count(parent_category_name) %>%
+  arrange(desc(n)) %>%
+  left_join(df_parentcategory_en) %>%
+  filter(!is.na(parent_category_name_en)) %>%
+           ggplot(aes(reorder(parent_category_name_en, -n, FUN = min), n, fill = parent_category_name_en)) +
+           geom_col() + 
+           theme(legend.position = "none", axis.text.x  = element_text(angle = 90,hjust=1, vjust=0.9)) + 
+           labs(x = 'citys',y = 'Total No of Ads') +
+           ggtitle("Top level ad category  classified by Avito's ad model")
+```
+
+Observation:
+
+ Top level ad category is Personal things - More than 6 lakh Users post ads  for selling Personal Things
+                                       2 lakhs users post ads for selling Home and Cottages & Consumer Electronics.
+                                       
+Top level ad category  ads are 
+for Personal belongings,
+home and Cottages and 11.5% for consumer electronics.
+
+##category_name - Fine grain ad category as classified by Avito's ad model.
+
+```{r,message=FALSE,warning=FALSE}
+category_name <- c("Одежда, обувь, аксессуары","Детская одежда и обувь","Товары для детей и игрушки",
+"Квартиры","Телефоны","Мебель и интерьер","Предложение услуг","Автомобили","Ремонт и строительство",
+"Бытовая техника","Недвижимость за рубежом","Квартиры","Дома, дачи, коттеджи",
+"Земельные участки","Комнаты","Грузовики и спецтехника","Готовый бизнес","Автомобили",
+"Гаражи и машиноместа","Коммерческая недвижимость")
+
+category_name_en <- c("Clothes,shoes accessories" , "Children's clothing and footwear" ,
+"Goods for children and toys" , "Apartments" , "Phones","Furniture and interior","Offer of services","Cars",
+"Repair and construction","Appliances","Property Abroad",
+"Houses, cottages, cottages","Land","Rooms","Trucks and special equipment","Ready business",
+"Garages and parking places","Commercial Property")
+
+df_category_en <- as.data.frame(cbind(category_name,category_name_en ) )
+
+
+options(scipen = 99)
+train %>%
+  count(category_name) %>%
+  arrange(desc(n)) %>%
+  left_join(df_category_en) %>%
+  filter(!is.na(category_name_en)) %>%
+           ggplot(aes(reorder(category_name_en, -n, FUN = min), n, fill = category_name_en)) +
+           geom_col() + 
+           theme(legend.position = "none", axis.text.x  = element_text(angle = 90,hjust=1, vjust=0.9)) + 
+           labs(x = 'citys',y = 'Total No of Ads') +
+           ggtitle("Fine grain ad category as classified by Avito's ad model")
+```
+Observation:
+ People usually sell Clothes shoes accessories(3 lakh) children clothing and Toys (3 lakh) 
+ 
+ the top 3  sub categories are:
+
+Clothes, shoes, accessories
+Children's clothing and footwear
+Goods for children and toys
+
+##User_type - User type.
+
+```{r,message=FALSE,warning=FALSE}
+
+ggplot(train,aes(user_type)) + geom_bar(col = "blue")
+
+```
+Most Users who sell bike are Private Users followed by company and shop.
+
+##Deal Probability  Histogram
+
+```{r,message=FALSE,warning=FALSE}
+
+ggplot(train,aes(x=deal_probability))+
+  geom_histogram(fill = "blue") +
+  labs(x = 'Deal Probabilty') +
+  ggtitle('Histogram of Deal Probability')
+  
+```
+
+Close to 65% (1000000/1503424 = 0.66) of the Ads  have Zero deal probability .
+Very few Ads have deal probability of 1.
+
+##Distribution of Deal Price(log)
+
+```{r,message=FALSE,warning=FALSE}
+
+ggplot(train,aes(x=log(price))) +
+  geom_histogram(fill = "blue") +
+  ggtitle('Log of Price histogram')
+  
+```
+
+Distribution Price in  each Ad
+
+##Activation dates i.e  Dates when ad was placed
+
+```{r,message=FALSE,warning=FALSE}
+ 
+ ggplot(train,aes(x=activation_date)) +
+  geom_histogram(fill = "blue")  +
+  ggtitle('Total No of Ads placed on particular day')
+  ```
+ 
+Total No of Ads placed on particular day from March 15 to March 28
+
+
+#Bi-Variate Analysis
+
+##Mean Deal probability per each region
+
+```{r,message=FALSE,warning=FALSE}
+train  %>%
+  left_join(df_regions_en) %>%
+ggplot(aes(x = region_en,y = deal_probability)) +
+  stat_summary(fun.y = "mean",geom = "bar",fill = "blue") +
+  theme(axis.text.x = element_text(angle = 90)) +
+   labs(x = 'region',y = 'mean deal probability') +
+  ggtitle('Mean Deal probability per each region')
+```
+
+
+Inference:
+- All regions have mean deal probability around 15%.
+ 
+##Mean Deal probability per each city
+
+```{r,message=FALSE,warning=FALSE}
+train  %>%
+  left_join(df_city_en) %>%
+  ggplot(aes(x = city_en,y = deal_probability)) +
+  stat_summary(fun.y = "mean",geom = "bar",fill = "blue") +
+  theme(axis.text.x = element_text(angle = 90)) +
+  labs(x = 'City',y = 'mean deal probability') + 
+   ggtitle('Mean Deal probability per each city')
+ ```
+  
+  Inference:
+  -All city have mean deal probability around 15%.
+  
+##Mean Deal probability per each Parent Category
+ 
+```{r,message=FALSE,warning=FALSE}
+  train  %>%
+  left_join(df_parentcategory_en) %>%
+  ggplot(aes(x = parent_category_name_en,y = deal_probability)) +
+  stat_summary(fun.y = "mean",geom = "bar",fill = "blue") +
+  theme(axis.text.x = element_text(angle = 90)) +
+  labs(x = 'parent category names',y = 'mean deal probability') +
+   ggtitle('Mean Deal probability per each parent category')
+```
+   
+   Inference:
+  -Services parent category have highest deal probability (40%) followed by transport and animals(25%).
+   
+ ## Mean Deal probability per each Category
+   
+```{r,message=FALSE,warning=FALSE}
+  
+   train  %>%
+  left_join(df_category_en) %>%
+  ggplot(aes(x = category_name_en,y = deal_probability)) +
+  stat_summary(fun.y = "mean",geom = "bar",fill = "blue") +
+  theme(axis.text.x = element_text(angle = 90)) +
+  labs(x = ' category names',y = 'mean deal probability')
+  
+```
+ 
+  Inference:
+  -Offer of services category have highest mean deal probability(40%) followed by Commercial property and cars(25%)
+  Children's clothing and footwear,clothes shoes and Accessories and property abroad have least mean deal probability
+  
+## Mean Deal probability vs User Type
+  
+   
+```{r,message=FALSE,warning=FALSE}
+  train  %>%
+  ggplot(aes(x = user_type,y = deal_probability)) +
+  stat_summary(fun.y = "mean",geom = "bar",fill = "blue") +
+  theme(axis.text.x = element_text(angle = 90)) +
+  labs(x = 'User Type',y = 'mean deal probability') +
+  ggtitle('Mean Deal probability vs User Type')
+```
+  
+  
+  Inference :
+  The mean deal probability is higher(15%) for Private Users. whereas Shop Users have lower deal probaility (5%)
+
+# Text Analytics
+
+##Iterator to create the vocabulary
+
+```{r,message=FALSE,warning=FALSE}
+it <- combined %$%
+  str_to_lower(txt) %>%
+  str_replace_all("[^[:alpha:]]", " ") %>%
+  str_replace_all("\\s+", " ") %>%
+  tokenize_word_stems(language = "russian") %>% 
+  itoken()
+  ```
+## Creating Vocabulary 
+
+- collect unique terms from all documents and mark each of them with a unique ID 
+
+```{r,message=FALSE,warning=FALSE}
+vocab <- create_vocabulary(it, ngram = c(1, 1), stopwords = stopwords("ru")) 
+```
+
+## Pruning the  Vocabulary 
+
+-Prune the vocabulary to eliminate the unnecessary words.
+
+```{r,message=FALSE,warning=FALSE}
+vocab = vocab %>%  prune_vocabulary(term_count_min = 3, doc_proportion_max = 0.4, vocab_term_max = 6500)
+```
+
+```{r,message=FALSE,warning=FALSE}
+vect = vocab %>% vocab_vectorizer()
+```
+## Creating Document Term Matrix
+
+```{r,message=FALSE,warning=FALSE}
+m_tfidf <- TfIdf$new(norm = "l2", sublinear_tf = T)
+tfidf <-  create_dtm(it, vect) %>% 
+  fit_transform(m_tfidf)
+```
+# XG Boost Model
+
+```{r}
+library(Matrix)
+dmat <- combined %>% 
+  select(-txt) %>% 
+  sparse.model.matrix(~ . - 1, .) %>% 
+  cbind(tfidf)
+```
+
+```{r,message=FALSE,warning=FALSE}
+trrow = 1:nrow(train)
+library('xgboost')
+dtrain <- xgb.DMatrix(data = dmat[trrow, ], label = train$deal_probability)
+dtest <- xgb.DMatrix(data = dmat[-trrow, ])
+cols <- colnames(dmat)
+
+params <- list(objective = "reg:logistic",
+          booster = "gbtree",
+          eval_metric = "rmse",
+          nthread = 8,
+          eta = 0.05,
+          max_depth = 17,
+          min_child_weight = 2,
+          gamma = 0,
+          subsample = 0.7,
+          colsample_bytree = 0.7,
+          alpha = 0,
+          lambda = 0,
+          nrounds = 100)
+```

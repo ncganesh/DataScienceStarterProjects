@@ -1,0 +1,571 @@
+---
+title: 'Donor Choose Extensive data Analysis'
+
+date: '`r Sys.Date()`'
+output:
+  html_document:
+    number_sections: true
+    fig_caption: true
+    toc: true
+    fig_width: 7
+    fig_height: 4.5
+    theme: cosmo
+    highlight: tango
+    code_folding: hide
+---
+
+
+
+<center><img src="https://cdn.donorschoose.net/images/media-logo-tagline-reversed@2x.jpg"></center>
+
+# Introduction
+
+> Founded in 2000 by a Bronx history teacher, `DonorsChoose.org` has raised $685 million for America's classrooms. 
+Teachers at three-quarters of all the public schools in the U.S. have come to DonorsChoose.org to request what their students 
+need, making DonorsChoose.org the leading platform for supporting public education.
+To date, 3 million people and partners have funded 1.1 million DonorsChoose.org projects. 
+But teachers still spend more than a billion dollars of their own money on classroom materials. 
+To get students what they need to learn, the team at DonorsChoose.org needs to be able to connect donors with the projects that most inspire them.
+
+# Loading Libraries and Importing Data {.tabset .tabset-fade .tabset-pills}
+
+## Loading libraries
+
+```{r, message = FALSE}
+library('tidyverse')
+library('data.table')
+library('gridExtra')
+library('tidytext') # text analysis
+library('tm')
+library(wordcloud)
+library(gridExtra)
+library(highcharter)
+library(lubridate)
+
+library('tidyverse')
+library('data.table')
+library('gridExtra')
+library('tidytext') 
+library('tm')
+library(wordcloud)
+library(Matrix)
+library(text2vec)
+library(tokenizers)
+library(stopwords)
+library(magrittr)
+
+```
+
+## Importing data
+
+```{r,message=FALSE,warning=FALSE}
+
+rm(list=ls())
+
+fillColor = "#FFA07A"
+fillColor2 = "#F1C40F"
+
+donations <- as.tibble(fread("../input/Donations.csv"))
+
+donors <- as.tibble(fread("../input/Donors.csv"))
+
+projects <- read_csv("../input/Projects.csv",col_types = cols(
+   X1 = col_integer(),
+  `Project ID` = col_character(),
+  `School ID` = col_character(),
+  `Teacher ID` = col_character(),
+  `Teacher Project Posted Sequence` = col_integer(),
+  `Project Type` = col_character(),
+  `Project Title` = col_character(),
+  `Project Essay` = col_character(),
+  `Project Subject Category Tree` = col_character(),
+  `Project Subject Subcategory Tree` = col_character(),
+  `Project Grade Level Category` = col_character(),
+  `Project Resource Category` = col_character(),
+  `Project Cost` = col_character(),
+  `Project Posted Date` = col_date(format = ""),
+  `Project Current Status` = col_character(),
+  `Project Fully Funded Date` = col_date(format = "")))
+  
+ resources <- read_csv("../input/Resources.csv")
+
+schools <- read_csv("../input/Schools.csv")
+
+teachers <- read_csv("../input/Teachers.csv")
+
+```
+
+##Formatting features
+
+```{r,message=FALSE,warning=FALSE}
+donations <- donations %>%
+  rename(DonationAmount = `Donation Amount`)%>%
+  rename(donationoptionaldonation = `Donation Included Optional Donation`) %>%
+  rename(donationrecieveddate = `Donation Received Date`) %>%
+  rename(donorcartsequence = `Donor Cart Sequence`)
+  
+  donations = donations %>% mutate(donationrecieveddate = ymd_hms(donationrecieveddate))
+  
+  donations = donations %>%
+ mutate(month = month(donationrecieveddate, label = TRUE)) %>%
+ mutate(year = year(donationrecieveddate))
+  
+  
+  donors <- donors %>%
+  rename(DonorState = `Donor State`)  %>% 
+  rename(donorcity = `Donor City`) %>% 
+  rename(donoristeacher = `Donor Is Teacher`) %>% 
+  rename(donorzip = `Donor Zip`)
+  
+   projects  <- projects %>%
+  rename(teacherprojectpostedsequence = `Teacher Project Posted Sequence`)  %>% 
+  rename(projecttype = `Project Type`) %>% 
+  rename(projecttitle = `Project Title`) %>% 
+  rename(projectessay = `Project Essay`) %>%
+  rename(projectsubjectcategory = `Project Subject Category Tree`) %>%
+  rename(projectsubjectsubcategory=`Project Subject Subcategory Tree`) %>%
+  rename(projectgradelevelcategory=`Project Grade Level Category`) %>%
+  rename(projectresourcecategory=`Project Resource Category`) %>%
+  rename(projectcost =`Project Cost`) %>%
+  rename(projectcurrentstatus=`Project Current Status`) %>%
+  rename(projectfullyfundeddate=`Project Fully Funded Date`) %>%
+  rename(projectposteddate = `Project Posted Date`)
+  
+   resources  <- resources %>%
+  rename(resourceitemname = `Resource Item Name`)  %>% 
+  rename(resourcequantity = `Resource Quantity`) %>% 
+  rename(resourceunitprice = `Resource Unit Price`) %>%
+  rename(resourcevendorname = `Resource Vendor Name`) 
+```
+
+#DonorChoose Solution steps
+
+> DonorsChoose.org has funded over 1.1 million classroom requests through the support of 3 million donors, the majority of whom were making their first-ever donation to a public school.
+If DonorsChoose.org can motivate even a fraction of those donors to make another donation, that could have a huge impact on the number of classroom requests fulfilled.A good solution will enable DonorsChoose.org 
+to build targeted email campaigns recommending specific classroom requests to prior donors.
+
+> We need to build a Recommender System so that we can target email campaigns recommending specific
+classroom requests to donors.We need to send Email to donors who has donated only once based on the behavior and past donations.
+
+**`1.Exploratory Data Analysis - NLP`**
+
+**`2. Identifying the factors influencing project status and Building a Model to predict the projects which will get EXPIRED.`**
+
+**`3.Build a Recommender and Suggest Expired projects to specific donors`**
+
+#Exploratory Data Analysis
+
+## Donations
+
+### Donation Amount,Optionaldonation
+
+```{r,message=FALSE,warning=FALSE}
+options(scipen = 99)
+table(donations$donationoptionaldonation)
+p1 = ggplot(donations,aes(x= donationoptionaldonation)) + 
+geom_bar(fill = "cyan")
+
+ p2 = ggplot(donations,aes(x= DonationAmount)) + 
+geom_histogram(fill = "blue")
+
+p3 = ggplot(donations,aes(x= DonationAmount)) + 
+geom_histogram(fill = "blue") +
+xlim(0,350)
+
+p4 = ggplot(donations,aes(x= donorcartsequence)) + 
+geom_histogram(fill = "blue")
+grid.arrange(p2,p3,p1,p4,ncol = 2)
+```
+
+grid.arrange(p2,p3,p1,p4,ncol = 2)
+
+**Optionaldonation** - Yes/No to give `15%` of donation amount to Donorchoose.We can see that  `85%` of donors are accepting 
+                      to give 15% of Donation Amount to the Organization(DC.)
+                      
+**DonationAmount** - `Minimum` and  `Maximum` Donation Amount is 0.01 and  60000.The Data has outlier and  is Skewed 
+and preferred measure in this case is  `Median` ($25) as median is less affected by outliers and skewed data than the mean.
+
+
+
+```{r,message=FALSE,warning=FALSE} 
+
+
+donations %>%
+count(year(donationrecieveddate))
+
+ggplot(donations,aes(x= month)) + 
+geom_bar(fill = "blue") + 
+facet_wrap(~year(donationrecieveddate)) +
+labs(x = "Donation Recieved Year") + 
+theme(axis.text.x = element_text(angle = 90)) + 
+ggtitle("Number of donations recieved each year over months")
+scale_x_date(date_labels = "%b") 
+
+```
+**Donation Recieved Date** - Donations has been  increasing over the years from 149 in 2012 to 1190542 in 2017.
+                             More Donations are made in Fall(August,September and October) and less donations in Summer.
+
+
+
+##Donors
+
+### Donors City,State,Is Donor Teacher and Donors Zip Code
+
+```{r,message=FALSE,warning=FALSE}
+  
+p3 = donors %>%
+count(donorcity) %>%
+  arrange(desc(n)) %>%
+  filter(n>10000 & n < 50000) %>%
+           ggplot(aes(reorder(donorcity, -n, FUN = min), n, fill = donorcity)) +
+           geom_col() + 
+           theme(legend.position = "none", axis.text.x  = element_text(angle = 90,hjust=1, vjust=0.9)) + 
+           labs(x = 'City',y = 'Total No of donors') +
+           ggtitle("Totaldonors per each city")
+
+
+p4 = donors %>%
+count(DonorState) %>%
+  arrange(desc(n)) %>%
+  filter(n>47000) %>%
+           ggplot(aes(reorder(DonorState, -n, FUN = min), n, fill = DonorState)) +
+           geom_col() + 
+           theme(legend.position = "none", axis.text.x  = element_text(angle = 90,hjust=1, vjust=0.9)) + 
+           labs(x = 'State',y = 'Total No of donors') +
+           ggtitle("Totaldonors per each state")
+
+donordonat = donors %>%
+inner_join(donations)
+
+
+p5 = ggplot(donors,aes(x= (donoristeacher))) + 
+geom_bar(fill = "blue") +
+labs(x =  "Is Donor Teacher??")
+
+
+
+p6 = donors %>%
+count(donorzip) %>%
+  arrange(desc(n)) %>%
+  filter (n <50000 & n > 20000) %>%
+           ggplot(aes(reorder(donorzip, -n, FUN = min), n, fill = donorzip)) +
+           geom_col() + 
+           theme(legend.position = "none", axis.text.x  = element_text(angle = 90,hjust=1, vjust=0.6)) + 
+           labs(x = 'donorzip',y = 'Total No of donors') +
+           ggtitle("Totaldonors per each donorzip code")
+grid.arrange(p3,p4,p5,p6,ncol=2)
+```
+
+**Most Popular Donor Cities** are : `Chicago  New York  Brooklyn   Los Angeles   San Francisco`
+
+**Most Popular  Donor States** :    `California New York Texas Florida  Illnois`
+
+**Most Popular ZipCodes** : `606,945,100,112`
+
+**IsDonor Teacher** : 212285/2122640 - 11% of the donors are teachers and Total amount of donations made by teachers() 
+
+
+
+More  donors  are in California
+
+
+##Projects
+
+###Exploring Projects - projecttype,projectgradelevelcategory,projectcost,projectcurrentstatus
+
+```{r,message = FALSE,warning = FALSE} 
+options(scipen = 99)
+q1 = ggplot(projects,aes(x=teacherprojectpostedsequence)) +
+geom_histogram(fill="blue") +
+scale_x_continuous(limits = c(0,30)) +
+ theme(legend.position = "none", axis.text.x  = element_text(angle = 0,hjust=1, vjust=0.9)) + 
+           labs(x = 'teacherprojectpostedsequence',y = 'Total No of donors') +
+           ggtitle("Totaldonors per each teacherprojectpostedsequence")
+
+q2 = projects %>%
+count(projecttype) %>%
+arrange(desc(n)) %>% head(3) %>%
+ggplot(aes(reorder(projecttype, -n, FUN = min), n, fill = projecttype)) +
+           geom_col() + 
+           theme(legend.position = "none", axis.text.x  = element_text(angle = 10,hjust=1, vjust=0.9)) + 
+           labs(x = 'projecttype',y = 'Total No of donors') +
+           ggtitle("Totaldonors per each projecttype")
+           
+q6 = projects %>%
+count(projectgradelevelcategory) %>%
+arrange(desc(n)) %>%
+filter(n > 10000) %>%
+ggplot(aes(reorder(projectgradelevelcategory, -n, FUN = min), n, fill = projectgradelevelcategory)) +
+           geom_col() + 
+           theme(legend.position = "none", axis.text.x  = element_text(angle = 10,hjust=1, vjust=0.9)) + 
+           labs(x = 'projectgradelevelcategory',y = 'Total No of donors') +
+           ggtitle("Totaldonors per each projectgradelevelcategory")
+           
+
+projects$projectcost= str_replace(projects$projectcost,"\\$","")
+projects$projectcost = as.numeric(projects$projectcost)
+
+q9 = ggplot(projects,aes(x = projectcost)) + 
+geom_histogram(fill = "blue") +
+labs(x= 'Project Cost',y = 'Count') + 
+ggtitle('Distribution of Project Cost')
+
+ q11 = projects %>%
+filter(!is.na(projectcurrentstatus)) %>%
+count(projectcurrentstatus) %>%
+arrange(desc(n)) %>%
+head(4) %>%
+ ggplot(aes(reorder(projectcurrentstatus, -n, FUN = min), n, fill = projectcurrentstatus)) +
+           geom_col() + 
+           theme(legend.position = "none", axis.text.x  = element_text(angle =5,hjust=1, vjust=0.9)) + 
+           labs(x = 'projectcurrentstatus',y = 'Total No of donors') +
+           ggtitle("Totaldonors as per project current status")
+
+
+grid.arrange(q1,q2,q6,q9,ncol = 2)
+
+pl1 = projects %>%
+count(projectresourcecategory) %>%
+arrange(desc(n)) %>%
+filter(n > 50000) %>%
+ggplot(aes(reorder(projectresourcecategory, -n, FUN = min), n, fill = projectresourcecategory)) +
+           geom_col() + 
+           theme(legend.position = "none", axis.text.x  = element_text(angle = 30,hjust=1, vjust=0.9)) + 
+           labs(x = 'projectresourcecategory',y = 'Total No of donors') +
+           ggtitle("Totaldonors per each projectresourcecategory")
+           
+grid.arrange(q11,pl1,ncol = 2)
+
+q10  = ggplot(projects,aes(x = projectfullyfundeddate )) + 
+geom_histogram(fill = "blue") +
+labs(x= 'Project fullyfundeddate ',y = 'Count') + 
+ggtitle('Distribution of Project fullyfundeddate ')
+
+q15 = projects %>%
+count(projectsubjectsubcategory) %>%
+arrange(desc(n)) %>%
+filter(n > 27000) %>%
+ggplot(aes(reorder(projectsubjectsubcategory, -n, FUN = min), n, fill = projectsubjectsubcategory)) +
+           geom_col() + 
+           theme(legend.position = "none", axis.text.x  = element_text(angle = 90,hjust=1, vjust=0.9)) + 
+           labs(x = 'projectsubjectcategory',y = 'Total No of donors') +
+           ggtitle("Totaldonors per each projectsubjectsubcategory")
+grid.arrange(q10,q15,ncol = 2)
+```
+
+##Resources
+
+###Resource Item Price,Quantity,Vendor Name
+
+```{r,message = FALSE,warning = FALSE} 
+ 
+ r1 = resources %>%
+  count(resourceitemname) %>%
+  arrange(desc(n)) %>%
+ filter(n > 5000) %>%
+ ggplot(aes(reorder(resourceitemname, -n, FUN = min), n, fill = resourceitemname)) +
+           geom_col() + 
+           theme(legend.position = "none", axis.text.x  = element_text(angle = 30,hjust=1, vjust=0.9)) + 
+           labs(x = 'Resource Item Names',y = 'Total No of donors') +
+           ggtitle("Totaldonors as per Resource Item Names")
+
+r3=  resources %>%
+  count(resourcevendorname) %>%
+  arrange(desc(n)) %>%
+  filter(n > 100000) %>%
+  ggplot(aes(reorder(resourcevendorname , -n, FUN = min), n, fill = resourcevendorname )) +
+           geom_col() + 
+           theme(legend.position = "none", axis.text.x  = element_text(angle = 90,hjust=1, vjust=0.9)) + 
+           labs(x = 'resourcevendorname',y = 'Total No of donors') +
+           ggtitle("Totaldonors as per resourcevendorname ") 
+grid.arrange(r1,r3,ncol = 2)
+
+ options(scipen = 99)
+ resources %>%
+  count(resourcequantity) %>%
+  arrange(desc(n)) %>%
+  filter(n > 750000) %>%
+  ggplot(aes(reorder(resourcequantity , -n, FUN = min), n, fill = resourcequantity )) +
+           geom_col() + 
+           theme(legend.position = "none", axis.text.x  = element_text(angle = 90,hjust=1, vjust=0.9)) + 
+           labs(x = 'resourcequantity',y = 'Total No of donors') +
+           ggtitle("Totaldonors as per resource quantity ") 
+```
+
+
+#TEXT ANALYTICS - NLP - Understanding Text Features
+
+
+<center><img src="https://www.tidytextmining.com/images/tidyflow-ch-1.png"></center>
+
+> A `token` is a meaningful unit of text, most often a word, that we are interested in using for further analysis, 
+and tokenization is the process of splitting text into tokens.
+
+
+> We need to both break the text into individual tokens (a process called `tokenization`) and transform it 
+to a tidy data structure.
+To do this, we use tidytext's `unnest_tokens()` function.
+
+##Project Title WordCloud
+
+
+```{r,message=FALSE,warning=FALSE}
+titles = projects %>%
+         unnest_tokens(word,projecttitle) %>%
+         anti_join(stop_words,by = "word")
+
+
+layout(matrix(c(1, 2), nrow=2), heights=c(1, 4))
+par(mar=rep(0, 4))
+plot.new()
+text(x=0.5, y=0.5, "Most frequent Project Title words", cex = 1.5)
+
+titles %>%
+  count(word) %>%
+  top_n(40, n) %>%
+  with(wordcloud(word, n, color = c("red4", "black", "darkblue")))
+```
+ 
+>  there are a variety of methods and dictionaries that exist for evaluating the opinion or 
+  emotion in text. The tidytext package contains several `sentiment lexicons` in the sentiments dataset 
+  
+  
+<center><img src="https://www.tidytextmining.com/images/tidyflow-ch-2.png"></center> 
+
+
+##Project Title Sentiment Analysis
+  
+```{r,message=FALSE,warning=FALSE}
+  titles %>%
+  inner_join(get_sentiments("bing"), by = "word") %>%
+  count(word, sentiment, sort = TRUE) %>%
+  ungroup() %>%
+  group_by(sentiment) %>%
+  top_n(10, n) %>%
+  ungroup() %>%
+  mutate(word = reorder(word, n)) %>%
+  ggplot(aes(word, n, fill = sentiment)) +
+  geom_col(show.legend = FALSE) +
+  facet_wrap(~sentiment, scales = "free_y") +
+  labs(y = "Contribution to negative/positive sentiment", x = NULL) +
+  coord_flip() +
+  ggtitle("Project Title - Sentiment analysis")
+```
+
+
+
+#Building a Model to predict the projects which will get EXPIRED
+
+##Combining data & Including only Important features
+
+```{r,message=FALSE,warning=FALSE}
+set.seed(133)
+projects_sample <- sample_n(projects,30000)
+
+combined_sample1 <- projects_sample %>%
+  left_join(schools) %>%
+  left_join(teachers)
+
+combined_sample1$projectcurrentstatus[combined_sample1$projectcurrentstatus == "Fully Funded"] = 1
+combined_sample1$projectcurrentstatus[combined_sample1$projectcurrentstatus == "Expired"] = 0
+combined_sample1$projectcurrentstatus[combined_sample1$projectcurrentstatus == "Live"] = -1
+
+tr = combined_sample1 %>%  filter(projectcurrentstatus != '-1')
+te = combined_sample1 %>%  filter(projectcurrentstatus == '-1')
+
+
+tri <- 1:nrow(tr)
+y <- tr$projectcurrentstatus
+
+names(projects)
+tr_te = tr %>%
+  bind_rows(te) %>%
+  select(-projectcurrentstatus) %>%
+  mutate(txt = paste(projecttitle,projectessay,
+                     `Project Short Description`,`Project Need Statement`)) %>%
+  select(-`Project ID`,-`School ID`,-`Teacher ID`,
+         -projecttitle,-projectessay,-`Project Short Description`,
+         -`Project Need Statement`,-projectfullyfundeddate,
+         -`Project Expiration Date`,-projectposteddate,
+         -`Teacher First Project Posted Date`)
+```
+
+##Text analytics - TdIdf
+
+```{r,message=FALSE,warning=FALSE}
+#---------------------------
+cat("Parsing text...\n")
+cat("Parsing text...\n")
+it <- tr_te %$%
+  str_to_lower(txt) %>%
+  str_replace_all("[^[:alpha:]]", " ") %>%
+  str_replace_all("\\s+", " ") %>%
+  tokenize_word_stems(language = "english") %>% 
+  itoken()
+
+vect <- create_vocabulary(it, ngram = c(1, 1), stopwords = stopwords("en")) %>%
+  prune_vocabulary(term_count_min = 3, doc_proportion_max = 0.4, vocab_term_max = 12500) %>% 
+  vocab_vectorizer()
+
+m_tfidf <- TfIdf$new(norm = "l2", sublinear_tf = T)
+tfidf <-  create_dtm(it, vect) %>% 
+  fit_transform(m_tfidf)
+```
+
+
+
+##Preparing Data for XGBOOST
+
+```{r,message=FALSE,warning=FALSE}
+
+library(xgboost)
+tr_te = data.matrix(tr_te)
+#---------------------------
+cat("Preparing data...\n")
+X <- tr_te %>%
+  cbind(tfidf)
+
+dtestlive <- xgb.DMatrix(data = X[-tri, ])
+
+
+dtrain <- xgb.DMatrix(data = X[1:6000, ], label = y[1:6000])
+dtest <- xgb.DMatrix(data = X[6001:8000, ], label = y[6001:8000])
+dval <- xgb.DMatrix(data = X[8001:9610, ], label = y[8001:9610])
+cols <- colnames(X)
+```
+
+
+##Building XGBOOST Model
+
+```{r,message=FALSE,warning=FALSE}
+library('xgboost')
+p <- list(objective = "reg:logistic",
+          booster = "gbtree",
+          eval_metric = "auc",
+          nthread = 8,
+          eta = 0.05,
+          max_depth = 18,
+          min_child_weight = 11,
+          gamma = 0,
+          subsample = 0.8,
+          colsample_bytree = 0.7,
+          alpha = 2.25,
+          lambda = 0,
+          nrounds = 5000)
+
+m_xgb <- xgb.train(p, dtrain, p$nrounds, list(val = dval), print_every_n = 10, early_stopping_rounds = 50)
+
+xgb.importance(cols, model = m_xgb) %>%   
+  xgb.plot.importance(top_n = 15)
+
+```
+
+## Predicting Expired Projects 
+
+```{r,message=FALSE,warning=FALSE}0
+pred = predict(m_xgb,dtest)
+preds1 = ifelse(pred >= 0.75,1,0)
+table(preds1)
+```
+
+
